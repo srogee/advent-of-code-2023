@@ -1,14 +1,20 @@
 import * as fs from "fs";
 
 export class InputUtil {
-    public static load(path: string, removeEmptyLines?: boolean): string[] {
-        const input = fs.readFileSync(path, { encoding: "utf8" }).split(/\r?\n/);
+    public static load(path: string, removeEmptyLines: boolean = true): string[] {
+        const input = fs.readFileSync(path, { encoding: "utf8" });
+
+        return this.split(input, removeEmptyLines);
+    }
+
+    public static split(input: string, removeEmptyLines: boolean = true): string[] {
+        const lines = input.split(/\r?\n/);
 
         if (removeEmptyLines) {
-            return input.filter(line => line.length > 0);
+            return lines.filter(line => line.length > 0);
         }
         
-        return input;
+        return lines;
     }
 }
 
