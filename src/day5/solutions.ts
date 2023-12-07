@@ -1,9 +1,8 @@
 import * as path from "path";
-import { InputUtil, StringUtil } from "../common/input";
-import * as _ from "lodash";
+import { InputUtil } from "../common/input";
 
 // Shared
-const input = InputUtil.load(path.join(__dirname, "testinput.txt"), true);
+const input = InputUtil.load(path.join(__dirname, "input.txt"), true);
 
 type Concept = "seed" | "soil" | "fertilizer" | "water" | "light" | "temperature" | "humidity" | "location";
 
@@ -26,12 +25,13 @@ interface Range {
 class ConceptMapper {
     private maps: ConceptMap[];
 
+    // Given the input, parses it and generates data structure
     constructor(input: string[]) {
         this.maps = [];
         let currentConceptMap: ConceptMap | null = null;
         const keyword = " map:";
 
-        const cleanup = () => {
+        const addMap = () => {
             if (currentConceptMap) {
                 this.maps.push(currentConceptMap);
                 currentConceptMap.ranges.sort((a, b) => this.sortRangesAsc(a.source, b.source));
@@ -41,7 +41,7 @@ class ConceptMapper {
 
         for (const line of input) {
             if (line.includes(keyword)) {
-                cleanup();
+                addMap();
 
                 const pieces = line.split(" ")[0].split("-to-") as Concept[];
 
@@ -69,115 +69,86 @@ class ConceptMapper {
             }
         }
 
-        cleanup();
+        addMap();
     }
 
+    // Map a range or ranges all the way from seed to location, and return the possible ranges
     public map(ranges: Range[], mapIndex: number = 0): Range[] {
         // Base case - stop recursing, we're done
         if (mapIndex > this.maps.length - 1) {
             return ranges;
         }
 
-        console.log(`Mapping ranges ${this.rangesToStr(ranges)} from ${this.maps[mapIndex].source} to ${this.maps[mapIndex].destination}`)
+        // Map ranges, clean up, then recurse
         const oneToMany = ranges.flatMap(range => this.mapInternalOneToMany(range, mapIndex));
         oneToMany.sort(this.sortRangesAsc);
         return this.map(oneToMany, mapIndex + 1);
     }
 
+    // Map a range or ranges all the way from seed to location, and return the lowest possible
     public mapAndGetLowest(ranges: Range[]): number {
         return this.map(ranges)[0].start;
     }
 
-    private addRangeIfValid(rangeArray: Range[], range: Range) {
-        if (range && range.start != null && range.end != null && range.start < range.end) {
-            rangeArray.push(range);
-        }
-    }
+    // Map a single range to one or more ranges (e.g. seed to soil)
+    private mapInternalOneToMany(testRange: Range, mapIndex: number): Range[] {
+        // Find all ranges intersecting with the test range
+        const intersectingRanges = this.maps[mapIndex].ranges.filter(r => testRange.end >= r.source.start && testRange.start <= r.source.end);
 
-    private rangeMapToStr(range?: SourceRangeMap) {
-        if (range) {
-            return `${this.rangeToStr(range.source)}->${this.rangeToStr(range.destination)}`;
-        } else {
-            return "<none>"
-        }
-    }
-
-    private rangeToStr(range?: Range) {
-        if (range) {
-            return `[${range.start},${range.end}]`;
-        } else {
-            return "<none>"
-        }
-    }
-
-    private rangeMapsToStr(ranges: SourceRangeMap[]) {
-        return ranges.map(e => this.rangeMapToStr(e)).join(", ");
-    }
-
-    private rangesToStr(ranges: Range[]) {
-        return ranges.map(e => this.rangeToStr(e)).join(", ");
-    }
-
-    private mapInternalOneToMany(range: Range, mapIndex: number): Range[] {
-        const sourceRanges = this.maps[mapIndex].ranges;
-        const startRange = sourceRanges.find(r => r.source.start <= range.start && r.source.end >= range.start);
-        const endRange = sourceRanges.find(r => r.source.start <= range.end && r.source.end >= range.end);
-        const completelyInsideRanges = sourceRanges.filter(r => r.source.start > range.start && r.source.end < range.end);
-
-        let ret: Range[] = [];
-
-        // Special case - completely inside one range
-        if (startRange && endRange && startRange === endRange) {
-            const start = startRange.destination.start + range.start - startRange.source.start;
-            const end = start + range.end - range.start;
-            ret = [{
+        // Start with the intersecting ranges, clamp them if appropriate to the test range, and flag which ones are clamped
+        let startClampedRange: SourceRangeMap = null;
+        let endClampedRange: SourceRangeMap = null;
+        let ret: Range[] = intersectingRanges.map(r => {
+            let start = r.destination.start;
+            let end = r.destination.end;
+            if (r.source.start < testRange.start) {
+                startClampedRange = r;
+                start = r.destination.start + testRange.start - r.source.start;
+            }
+            if (r.source.end > testRange.end) {
+                endClampedRange = r;
+                end = r.destination.end + testRange.end - r.source.end
+            }
+            return {
                 start,
                 end
-            }];
-        }
-        else {
-            this.addRangeIfValid(ret, startRange?.destination);
+            }
+        });
 
-            // Generate ranges that go in the gaps around the ranges we completely encapsulate
-            const firstGapRange = {
-                start: Math.max(range.start, startRange?.source.end),
-                end: completelyInsideRanges[0]?.source.start
-            };
-            this.addRangeIfValid(ret, firstGapRange);
-
-            for (let i = 0; i < completelyInsideRanges.length; i++) {
-                // Map existing range to dest
+        if (intersectingRanges.length === 0) {
+            // No intersections, just return what was passed in
+            ret = [testRange];
+        } else {
+            // Before ranges
+            if (startClampedRange === null) {
                 ret.push({
-                    start: completelyInsideRanges[i].destination.start,
-                    end: completelyInsideRanges[i].destination.end
+                    start: testRange.start,
+                    end: intersectingRanges[0].source.start - 1
                 });
-
-                // Range between existing ranges
-                if (i + 1 < completelyInsideRanges.length) {
-                    ret.push({
-                        start: completelyInsideRanges[i].source.end,
-                        end: completelyInsideRanges[i + 1].source.start
-                    });
-                }
             }
 
-            if (completelyInsideRanges.length === 0) {
-                this.addRangeIfValid(ret, range);
+            // In between ranges
+            for (let i = 0; i + 1 < intersectingRanges.length; i++) {
+                ret.push({
+                    start: intersectingRanges[i].source.end + 1,
+                    end: intersectingRanges[i + 1].source.start - 1,
+                });
             }
 
-            const lastGapRange = {
-                start: completelyInsideRanges[completelyInsideRanges.length - 1]?.source.end,
-                end: Math.min(range.end, endRange?.source.start)
+            // After ranges
+            if (endClampedRange === null) {
+                ret.push({
+                    start: intersectingRanges[0].source.end + 1,
+                    end: testRange.end
+                });
             }
-            this.addRangeIfValid(ret, lastGapRange);
-
-            this.addRangeIfValid(ret, endRange?.destination);
         }
 
-        console.log(`Input: \t${this.rangeToStr(range)}, Start range: ${this.rangeMapToStr(startRange)}, End range: ${this.rangeMapToStr(endRange)}, Inside: ${this.rangeMapsToStr(completelyInsideRanges)}, Result: ${this.rangesToStr(ret)}`)
-        return _.cloneDeep(ret);
+        // Remove invalid ranges
+        return ret.filter(r => r.start <= r.end);
     }
 
+    // Sort two ranges by their start numbers
     private sortRangesAsc(a: Range, b: Range) {
         return a.start - b.start;
     }
@@ -187,12 +158,12 @@ const seeds = input[0].split(" ").map(num => parseInt(num)).filter(num => !isNaN
 const conceptMapper = new ConceptMapper(input);
 
 // Solution 1 - ???
-// const lowest = conceptMapper.mapAndGetLowest(seeds.map(seed => {
-//     return {
-//         start: seed, end: seed
-//     }
-// }));
-// console.log(`Solution #1: ${lowest}`);
+const lowest = conceptMapper.mapAndGetLowest(seeds.map(seed => {
+    return {
+        start: seed, end: seed
+    }
+}));
+console.log(`Solution #1: ${lowest}`);
 
 // Solution 2 - ???
 const seedRanges: Range[] = [];
