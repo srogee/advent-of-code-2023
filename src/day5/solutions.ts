@@ -1,5 +1,6 @@
 import * as path from "path";
 import { InputUtil, StringUtil } from "../common/input";
+import * as _ from "lodash";
 
 // Shared
 const input = InputUtil.load(path.join(__dirname, "testinput.txt"), true);
@@ -23,16 +24,17 @@ interface Range {
 }
 
 class ConceptMapper {
-    private maps: Map<Concept, ConceptMap>;
+    private maps: ConceptMap[];
 
     constructor(input: string[]) {
-        this.maps = new Map();
+        this.maps = [];
         let currentConceptMap: ConceptMap | null = null;
         const keyword = " map:";
 
         const cleanup = () => {
             if (currentConceptMap) {
-                this.maps.set(currentConceptMap.source, currentConceptMap);
+                this.maps.push(currentConceptMap);
+                currentConceptMap.ranges.sort((a, b) => this.sortRangesAsc(a.source, b.source));
                 currentConceptMap = null;
             }
         }
@@ -70,65 +72,136 @@ class ConceptMapper {
         cleanup();
     }
 
-    public map(value: number, source: Concept, destination: Concept): number {
-        const conceptMap = this.maps.get(source);
-        if (conceptMap && conceptMap.destination === destination) {
-            for (const range of conceptMap.ranges) {
-                if (value >= range.source.start && value <= range.source.end) {
-                    return range.destination.start + value - range.source.start;
-                }
-            }
+    public map(ranges: Range[], mapIndex: number = 0): Range[] {
+        // Base case - stop recursing, we're done
+        if (mapIndex > this.maps.length - 1) {
+            return ranges;
+        }
 
-            return value;
-        } else {
-            throw new Error(`Could not find map ${source}-to-${destination}`);
+        console.log(`Mapping ranges ${this.rangesToStr(ranges)} from ${this.maps[mapIndex].source} to ${this.maps[mapIndex].destination}`)
+        const oneToMany = ranges.flatMap(range => this.mapInternalOneToMany(range, mapIndex));
+        oneToMany.sort(this.sortRangesAsc);
+        return this.map(oneToMany, mapIndex + 1);
+    }
+
+    public mapAndGetLowest(ranges: Range[]): number {
+        return this.map(ranges)[0].start;
+    }
+
+    private addRangeIfValid(rangeArray: Range[], range: Range) {
+        if (range && range.start != null && range.end != null && range.start < range.end) {
+            rangeArray.push(range);
         }
     }
 
-    // public mapRange(range: Range, source: Concept, destination: Concept): Range[] {
-    //     const conceptMap = this.maps.get(source);
-    //     if (conceptMap && conceptMap.destination === destination) {
-    //         const existingRangesSorted = conceptMap.ranges.filter(range2 => range2.source.start >= range.start && range2.source.end <= range.end);
-    //         existingRangesSorted.sort((a, b) => a.source.start - b.source.start);
-    //     } else {
-    //         throw new Error(`Could not find map ${source}-to-${destination}`);
-    //     }
-    // }
-
-    public mapMulti(seed: number, path: Concept[]): number {
-        let value = seed;
-        for (let i = 0; i < path.length - 1; i++) {
-            value = this.map(value, path[i], path[i + 1]);
+    private rangeMapToStr(range?: SourceRangeMap) {
+        if (range) {
+            return `${this.rangeToStr(range.source)}->${this.rangeToStr(range.destination)}`;
+        } else {
+            return "<none>"
         }
-        return value;
+    }
+
+    private rangeToStr(range?: Range) {
+        if (range) {
+            return `[${range.start},${range.end}]`;
+        } else {
+            return "<none>"
+        }
+    }
+
+    private rangeMapsToStr(ranges: SourceRangeMap[]) {
+        return ranges.map(e => this.rangeMapToStr(e)).join(", ");
+    }
+
+    private rangesToStr(ranges: Range[]) {
+        return ranges.map(e => this.rangeToStr(e)).join(", ");
+    }
+
+    private mapInternalOneToMany(range: Range, mapIndex: number): Range[] {
+        const sourceRanges = this.maps[mapIndex].ranges;
+        const startRange = sourceRanges.find(r => r.source.start <= range.start && r.source.end >= range.start);
+        const endRange = sourceRanges.find(r => r.source.start <= range.end && r.source.end >= range.end);
+        const completelyInsideRanges = sourceRanges.filter(r => r.source.start > range.start && r.source.end < range.end);
+
+        let ret: Range[] = [];
+
+        // Special case - completely inside one range
+        if (startRange && endRange && startRange === endRange) {
+            const start = startRange.destination.start + range.start - startRange.source.start;
+            const end = start + range.end - range.start;
+            ret = [{
+                start,
+                end
+            }];
+        }
+        else {
+            this.addRangeIfValid(ret, startRange?.destination);
+
+            // Generate ranges that go in the gaps around the ranges we completely encapsulate
+            const firstGapRange = {
+                start: Math.max(range.start, startRange?.source.end),
+                end: completelyInsideRanges[0]?.source.start
+            };
+            this.addRangeIfValid(ret, firstGapRange);
+
+            for (let i = 0; i < completelyInsideRanges.length; i++) {
+                // Map existing range to dest
+                ret.push({
+                    start: completelyInsideRanges[i].destination.start,
+                    end: completelyInsideRanges[i].destination.end
+                });
+
+                // Range between existing ranges
+                if (i + 1 < completelyInsideRanges.length) {
+                    ret.push({
+                        start: completelyInsideRanges[i].source.end,
+                        end: completelyInsideRanges[i + 1].source.start
+                    });
+                }
+            }
+
+            if (completelyInsideRanges.length === 0) {
+                this.addRangeIfValid(ret, range);
+            }
+
+            const lastGapRange = {
+                start: completelyInsideRanges[completelyInsideRanges.length - 1]?.source.end,
+                end: Math.min(range.end, endRange?.source.start)
+            }
+            this.addRangeIfValid(ret, lastGapRange);
+
+            this.addRangeIfValid(ret, endRange?.destination);
+        }
+
+        console.log(`Input: \t${this.rangeToStr(range)}, Start range: ${this.rangeMapToStr(startRange)}, End range: ${this.rangeMapToStr(endRange)}, Inside: ${this.rangeMapsToStr(completelyInsideRanges)}, Result: ${this.rangesToStr(ret)}`)
+        return _.cloneDeep(ret);
+    }
+
+    private sortRangesAsc(a: Range, b: Range) {
+        return a.start - b.start;
     }
 }
 
 const seeds = input[0].split(" ").map(num => parseInt(num)).filter(num => !isNaN(num));
 const conceptMapper = new ConceptMapper(input);
-const seedToLocation: Concept[] = ["seed", "soil", "fertilizer", "water", "light", "temperature", "humidity", "location"];
 
 // Solution 1 - ???
-let min: number | null = null;
-for (let i = 0; i < seeds.length; i++) {
-    const seed = seeds[i];
-    const location = conceptMapper.mapMulti(seed, seedToLocation);
-    if (min === null || location < min) {
-        min = location;
-    }
-}
-console.log(`Solution #1: ${min}`);
+// const lowest = conceptMapper.mapAndGetLowest(seeds.map(seed => {
+//     return {
+//         start: seed, end: seed
+//     }
+// }));
+// console.log(`Solution #1: ${lowest}`);
 
 // Solution 2 - ???
-min = null;
+const seedRanges: Range[] = [];
 for (let i = 0; i < seeds.length; i += 2) {
-    for (let j = 0; j < seeds[i + 1]; j++) {
-        const seed = seeds[i] + j;
-        const location = conceptMapper.mapMulti(seed, seedToLocation);
-        if (min === null || location < min) {
-            min = location;
-        }
-    }
+    seedRanges.push({
+        start: seeds[i],
+        end: seeds[i] + seeds[i + 1] - 1
+    });
 }
 
-console.log(`Solution #2: ${min}`);
+const lowest2 = conceptMapper.mapAndGetLowest(seedRanges);
+console.log(`Solution #2: ${lowest2}`);
